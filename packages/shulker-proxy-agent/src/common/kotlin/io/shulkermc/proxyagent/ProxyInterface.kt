@@ -55,13 +55,20 @@ interface ProxyInterface {
     fun prepareNetworkAdminsPermissions(playerIds: List<UUID>)
 
     fun teleportPlayerOnServer(
-        playerName: String,
+        playerId: UUID,
         serverName: String,
     )
 
     fun getPlayerCount(): Int
 
     fun getPlayerCapacity(): Int
+
+    fun transferPlayerToAddress(
+        playerId: UUID,
+        address: InetSocketAddress,
+    )
+
+    fun transferEveryoneToAddress(address: InetSocketAddress)
 
     fun scheduleDelayedTask(
         delay: Long,

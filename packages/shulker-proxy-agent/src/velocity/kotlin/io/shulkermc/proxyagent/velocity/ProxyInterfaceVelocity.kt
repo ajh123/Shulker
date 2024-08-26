@@ -117,7 +117,9 @@ class ProxyInterfaceVelocity(
             if (!event.result.isAllowed) return@register
             val result = hook(this.wrapPlayer(event.player), event.originalServer.serverInfo.name)
 
-            if (result.newServerName.isPresent) {
+            if (!result.allowed) {
+                event.result = ServerPreConnectEvent.ServerResult.denied()
+            } else if (result.newServerName.isPresent) {
                 event.result =
                     ServerPreConnectEvent.ServerResult.allowed(
                         this.proxy.getServer(result.newServerName.get()).get(),
@@ -152,13 +154,28 @@ class ProxyInterfaceVelocity(
     }
 
     override fun teleportPlayerOnServer(
-        playerName: String,
+        playerId: UUID,
         serverName: String,
     ) {
-        this.proxy.getPlayer(playerName).ifPresent { player ->
+        this.proxy.getPlayer(playerId).ifPresent { player ->
             this.proxy.getServer(serverName).ifPresent { server ->
                 player.createConnectionRequest(server).fireAndForget()
             }
+        }
+    }
+
+    override fun transferPlayerToAddress(
+        playerId: UUID,
+        address: InetSocketAddress,
+    ) {
+        this.proxy.getPlayer(playerId).ifPresent { player ->
+            player.transferToHost(address)
+        }
+    }
+
+    override fun transferEveryoneToAddress(address: InetSocketAddress) {
+        this.proxy.allPlayers.forEach { player ->
+            player.transferToHost(address)
         }
     }
 

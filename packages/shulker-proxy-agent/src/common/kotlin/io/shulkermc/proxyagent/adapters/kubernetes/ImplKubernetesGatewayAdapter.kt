@@ -2,17 +2,25 @@ package io.shulkermc.proxyagent.adapters.kubernetes
 
 import io.fabric8.kubernetes.api.model.ObjectReference
 import io.fabric8.kubernetes.api.model.ObjectReferenceBuilder
+import io.fabric8.kubernetes.api.model.Service
 import io.fabric8.kubernetes.client.KubernetesClient
 import io.fabric8.kubernetes.client.KubernetesClientBuilder
 import io.fabric8.kubernetes.client.informers.ResourceEventHandler
+import io.fabric8.kubernetes.client.informers.SharedIndexInformer
 import io.fabric8.kubernetes.client.okhttp.OkHttpClientFactory
+import io.shulkermc.proxyagent.Configuration
 import io.shulkermc.proxyagent.adapters.kubernetes.models.AgonesV1GameServer
+import io.shulkermc.proxyagent.utils.addressFromHostString
+import java.net.InetSocketAddress
+import java.util.Optional
 import java.util.concurrent.CompletionStage
 
 class ImplKubernetesGatewayAdapter(proxyNamespace: String, proxyName: String) : KubernetesGatewayAdapter {
     companion object {
         private const val PROXY_INFORMER_SYNC_MS = 30L * 1000
         private const val SERVER_INFORMER_SYNC_MS = 10L * 1000
+        private const val SERVICE_INFORMER_SYNC_MS = 30L * 1000
+        private const val MINECRAFT_DEFAULT_PORT = 25565
     }
 
     private val kubernetesClient: KubernetesClient =
@@ -45,6 +53,15 @@ class ImplKubernetesGatewayAdapter(proxyNamespace: String, proxyName: String) : 
         ).list()
     }
 
+    override fun getExternalAddress(): Optional<InetSocketAddress> {
+        return this.getExternalAddressFromService(
+            this.kubernetesClient.services()
+                .inNamespace(Configuration.PROXY_NAMESPACE)
+                .withName(Configuration.PROXY_FLEET_NAME)
+                .get(),
+        )
+    }
+
     override fun watchProxyEvents(
         callback: (action: WatchAction, proxy: AgonesV1GameServer) -> Unit,
     ): CompletionStage<KubernetesGatewayAdapter.EventWatcher> {
@@ -55,14 +72,7 @@ class ImplKubernetesGatewayAdapter(proxyNamespace: String, proxyName: String) : 
                 .withLabel("app.kubernetes.io/component", "proxy")
                 .inform(eventHandler, PROXY_INFORMER_SYNC_MS)
 
-        return proxyInformer.start()
-            .thenApply {
-                object : KubernetesGatewayAdapter.EventWatcher {
-                    override fun stop() {
-                        proxyInformer.stop()
-                    }
-                }
-            }
+        return this.createEventWatcher(proxyInformer)
     }
 
     override fun watchMinecraftServerEvents(
@@ -75,12 +85,32 @@ class ImplKubernetesGatewayAdapter(proxyNamespace: String, proxyName: String) : 
                 .withLabel("app.kubernetes.io/component", "minecraft-server")
                 .inform(eventHandler, SERVER_INFORMER_SYNC_MS)
 
-        return minecraftServerInformer.start().thenApply {
-            object : KubernetesGatewayAdapter.EventWatcher {
-                override fun stop() {
-                    minecraftServerInformer.stop()
-                }
+        return this.createEventWatcher(minecraftServerInformer)
+    }
+
+    override fun watchExternalAddressUpdates(
+        callback: (address: Optional<InetSocketAddress>) -> Unit,
+    ): CompletionStage<KubernetesGatewayAdapter.EventWatcher> {
+        val eventHandler =
+            this.createEventHandler<Service> { _, service ->
+                callback(this.getExternalAddressFromService(service))
             }
+
+        val serviceInformer =
+            this.kubernetesClient.services()
+                .inNamespace(Configuration.PROXY_NAMESPACE)
+                .withName(Configuration.PROXY_FLEET_NAME)
+                .inform(eventHandler, SERVICE_INFORMER_SYNC_MS)
+
+        return this.createEventWatcher(serviceInformer)
+    }
+
+    private fun getExternalAddressFromService(service: Service): Optional<InetSocketAddress> {
+        return if (service.spec.type == "LoadBalancer") {
+            Optional.ofNullable(service.status.loadBalancer?.ingress?.firstOrNull())
+                .map { ingress -> addressFromHostString(ingress.ip) }
+        } else {
+            Optional.empty()
         }
     }
 
@@ -102,6 +132,16 @@ class ImplKubernetesGatewayAdapter(proxyNamespace: String, proxyName: String) : 
                 deletedFinalStateUnknown: Boolean,
             ) {
                 callback(WatchAction.DELETED, obj)
+            }
+        }
+    }
+
+    private fun <T> createEventWatcher(informer: SharedIndexInformer<T>): CompletionStage<KubernetesGatewayAdapter.EventWatcher> {
+        return informer.start().thenApply {
+            object : KubernetesGatewayAdapter.EventWatcher {
+                override fun stop() {
+                    informer.stop()
+                }
             }
         }
     }

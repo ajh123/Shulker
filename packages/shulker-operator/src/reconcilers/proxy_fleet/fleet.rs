@@ -34,6 +34,7 @@ use crate::agent::AgentConfig;
 use crate::constants;
 use crate::reconcilers::agent::get_agent_plugin_url;
 use crate::reconcilers::agent::AgentSide;
+use crate::reconcilers::minecraft_cluster::external_servers_config_map::ExternalServersConfigMapBuilder;
 use crate::reconcilers::redis_ref::RedisRef;
 use crate::resources::resourceref_resolver::ResourceRefResolver;
 use google_agones_crds::v1::fleet::Fleet;
@@ -42,7 +43,6 @@ use google_agones_crds::v1::game_server::GameServerEvictionSpec;
 use google_agones_crds::v1::game_server::GameServerHealthSpec;
 use google_agones_crds::v1::game_server::GameServerSpec;
 use shulker_crds::v1alpha1::proxy_fleet::ProxyFleet;
-use shulker_crds::v1alpha1::proxy_fleet::ProxyFleetTemplateSpec;
 use shulker_kube_utils::reconcilers::builder::ResourceBuilder;
 
 use super::config_map::ConfigMapBuilder;
@@ -52,6 +52,7 @@ const PROXY_SHULKER_CONFIG_DIR: &str = "/mnt/shulker/config";
 const PROXY_SHULKER_FORWARDING_SECRET_DIR: &str = "/mnt/shulker/forwarding-secret";
 const PROXY_DATA_DIR: &str = "/server";
 const PROXY_DRAIN_LOCK_DIR: &str = "/mnt/drain-lock";
+const PROXY_SHULKER_EXTERNAL_SERVERS_DIR: &str = "/mnt/shulker/external-servers";
 
 lazy_static! {
     static ref PROXY_SECURITY_CONTEXT: SecurityContext = SecurityContext {
@@ -212,7 +213,7 @@ impl<'a> FleetBuilder {
                     container_port: 25577,
                     ..ContainerPort::default()
                 }]),
-                env: Some(self.get_env(context, &proxy_fleet.spec.template.spec)?),
+                env: Some(self.get_env(context, proxy_fleet)?),
                 readiness_probe: Some(Probe {
                     exec: Some(ExecAction {
                         command: Some(vec![
@@ -226,30 +227,7 @@ impl<'a> FleetBuilder {
                 }),
                 image_pull_policy: Some("IfNotPresent".to_string()),
                 security_context: Some(PROXY_SECURITY_CONTEXT.clone()),
-                volume_mounts: Some(vec![
-                    VolumeMount {
-                        name: "shulker-forwarding-secret".to_string(),
-                        mount_path: PROXY_SHULKER_FORWARDING_SECRET_DIR.to_string(),
-                        read_only: Some(true),
-                        ..VolumeMount::default()
-                    },
-                    VolumeMount {
-                        name: "proxy-data".to_string(),
-                        mount_path: PROXY_DATA_DIR.to_string(),
-                        ..VolumeMount::default()
-                    },
-                    VolumeMount {
-                        name: "proxy-drain-lock".to_string(),
-                        mount_path: PROXY_DRAIN_LOCK_DIR.to_string(),
-                        read_only: Some(true),
-                        ..VolumeMount::default()
-                    },
-                    VolumeMount {
-                        name: "proxy-tmp".to_string(),
-                        mount_path: "/tmp".to_string(),
-                        ..VolumeMount::default()
-                    },
-                ]),
+                volume_mounts: Some(self.get_volume_mounts(context, proxy_fleet)),
                 ..Container::default()
             }],
             service_account_name: Some(format!(
@@ -257,51 +235,7 @@ impl<'a> FleetBuilder {
                 &proxy_fleet.spec.cluster_ref.name
             )),
             restart_policy: Some("Never".to_string()),
-            volumes: Some(vec![
-                Volume {
-                    name: "shulker-config".to_string(),
-                    config_map: Some(ConfigMapVolumeSource {
-                        name: Some(
-                            proxy_fleet
-                                .spec
-                                .template
-                                .spec
-                                .config
-                                .existing_config_map_name
-                                .clone()
-                                .unwrap_or_else(|| ConfigMapBuilder::name(proxy_fleet)),
-                        ),
-                        ..ConfigMapVolumeSource::default()
-                    }),
-                    ..Volume::default()
-                },
-                Volume {
-                    name: "shulker-forwarding-secret".to_string(),
-                    secret: Some(SecretVolumeSource {
-                        secret_name: Some(format!(
-                            "{}-forwarding-secret",
-                            &proxy_fleet.spec.cluster_ref.name
-                        )),
-                        ..SecretVolumeSource::default()
-                    }),
-                    ..Volume::default()
-                },
-                Volume {
-                    name: "proxy-data".to_string(),
-                    empty_dir: Some(EmptyDirVolumeSource::default()),
-                    ..Volume::default()
-                },
-                Volume {
-                    name: "proxy-drain-lock".to_string(),
-                    empty_dir: Some(EmptyDirVolumeSource::default()),
-                    ..Volume::default()
-                },
-                Volume {
-                    name: "proxy-tmp".to_string(),
-                    empty_dir: Some(EmptyDirVolumeSource::default()),
-                    ..Volume::default()
-                },
-            ]),
+            volumes: Some(self.get_volumes(context, proxy_fleet)),
             ..PodSpec::default()
         };
 
@@ -447,25 +381,15 @@ impl<'a> FleetBuilder {
     fn get_env(
         &self,
         context: &FleetBuilderContext<'a>,
-        spec: &ProxyFleetTemplateSpec,
+        proxy_fleet: &ProxyFleet,
     ) -> Result<Vec<EnvVar>, anyhow::Error> {
+        let spec = &proxy_fleet.spec.template.spec;
         let redis_ref = RedisRef::from_cluster(context.cluster)?;
 
         let mut env: Vec<EnvVar> = vec![
             EnvVar {
                 name: "SHULKER_CLUSTER_NAME".to_string(),
                 value: Some(context.cluster.name_any()),
-                ..EnvVar::default()
-            },
-            EnvVar {
-                name: "SHULKER_PROXY_NAME".to_string(),
-                value_from: Some(EnvVarSource {
-                    field_ref: Some(ObjectFieldSelector {
-                        field_path: "metadata.name".to_string(),
-                        ..ObjectFieldSelector::default()
-                    }),
-                    ..EnvVarSource::default()
-                }),
                 ..EnvVar::default()
             },
             EnvVar {
@@ -480,6 +404,22 @@ impl<'a> FleetBuilder {
                 ..EnvVar::default()
             },
             EnvVar {
+                name: "SHULKER_PROXY_NAME".to_string(),
+                value_from: Some(EnvVarSource {
+                    field_ref: Some(ObjectFieldSelector {
+                        field_path: "metadata.name".to_string(),
+                        ..ObjectFieldSelector::default()
+                    }),
+                    ..EnvVarSource::default()
+                }),
+                ..EnvVar::default()
+            },
+            EnvVar {
+                name: "SHULKER_PROXY_FLEET_NAME".to_string(),
+                value: Some(proxy_fleet.name_any()),
+                ..EnvVar::default()
+            },
+            EnvVar {
                 name: "SHULKER_PROXY_TTL_SECONDS".to_string(),
                 value: Some(spec.config.ttl_seconds.to_string()),
                 ..EnvVar::default()
@@ -487,19 +427,6 @@ impl<'a> FleetBuilder {
             EnvVar {
                 name: "SHULKER_PROXY_PLAYER_DELTA_BEFORE_EXCLUSION".to_string(),
                 value: Some(spec.config.players_delta_before_exclusion.to_string()),
-                ..EnvVar::default()
-            },
-            EnvVar {
-                name: "SHULKER_NETWORK_ADMINS".to_string(),
-                value: Some(
-                    context
-                        .cluster
-                        .spec
-                        .network_admins
-                        .as_ref()
-                        .map(|list| list.join(","))
-                        .unwrap_or("".to_string()),
-                ),
                 ..EnvVar::default()
             },
             EnvVar {
@@ -528,6 +455,27 @@ impl<'a> FleetBuilder {
                 ..EnvVar::default()
             },
         ];
+
+        if let Some(network_admins) = context.cluster.spec.network_admins.as_ref() {
+            env.push(EnvVar {
+                name: "SHULKER_NETWORK_ADMINS".to_string(),
+                value: Some(network_admins.join(",")),
+                ..EnvVar::default()
+            })
+        }
+
+        if let Some(preferred_reconnection_address) = proxy_fleet
+            .spec
+            .service
+            .as_ref()
+            .and_then(|x| x.preferred_reconnection_address.as_ref())
+        {
+            env.push(EnvVar {
+                name: "SHULKER_PROXY_PREFERRED_RECONNECT_ADDRESS".to_string(),
+                value: Some(preferred_reconnection_address.clone()),
+                ..EnvVar::default()
+            })
+        }
 
         if let Some(redis_ref_credentials_secret_name) = redis_ref.credentials_secret_name.as_ref()
         {
@@ -621,6 +569,127 @@ impl<'a> FleetBuilder {
             ProxyFleetTemplateVersion::BungeeCord => "BUNGEE_JOB_ID".to_string(),
             ProxyFleetTemplateVersion::Waterfall => "WATERFALL_BUILD_ID".to_string(),
         }
+    }
+
+    fn get_volumes(
+        &self,
+        context: &FleetBuilderContext<'a>,
+        proxy_fleet: &ProxyFleet,
+    ) -> Vec<Volume> {
+        let mut volumes = vec![
+            Volume {
+                name: "shulker-config".to_string(),
+                config_map: Some(ConfigMapVolumeSource {
+                    name: Some(
+                        proxy_fleet
+                            .spec
+                            .template
+                            .spec
+                            .config
+                            .existing_config_map_name
+                            .clone()
+                            .unwrap_or_else(|| ConfigMapBuilder::name(proxy_fleet)),
+                    ),
+                    ..ConfigMapVolumeSource::default()
+                }),
+                ..Volume::default()
+            },
+            Volume {
+                name: "shulker-forwarding-secret".to_string(),
+                secret: Some(SecretVolumeSource {
+                    secret_name: Some(format!(
+                        "{}-forwarding-secret",
+                        &proxy_fleet.spec.cluster_ref.name
+                    )),
+                    ..SecretVolumeSource::default()
+                }),
+                ..Volume::default()
+            },
+            Volume {
+                name: "proxy-data".to_string(),
+                empty_dir: Some(EmptyDirVolumeSource::default()),
+                ..Volume::default()
+            },
+            Volume {
+                name: "proxy-drain-lock".to_string(),
+                empty_dir: Some(EmptyDirVolumeSource::default()),
+                ..Volume::default()
+            },
+            Volume {
+                name: "proxy-tmp".to_string(),
+                empty_dir: Some(EmptyDirVolumeSource::default()),
+                ..Volume::default()
+            },
+        ];
+
+        let has_external_servers = context
+            .cluster
+            .spec
+            .external_servers
+            .as_ref()
+            .map_or(false, |list| !list.is_empty());
+
+        if has_external_servers {
+            volumes.push(Volume {
+                name: "shulker-external-servers".to_string(),
+                config_map: Some(ConfigMapVolumeSource {
+                    name: Some(ExternalServersConfigMapBuilder::name(context.cluster)),
+                    ..ConfigMapVolumeSource::default()
+                }),
+                ..Volume::default()
+            })
+        }
+
+        volumes
+    }
+
+    fn get_volume_mounts(
+        &self,
+        context: &FleetBuilderContext<'a>,
+        _proxy_fleet: &ProxyFleet,
+    ) -> Vec<VolumeMount> {
+        let mut volume_mounts = vec![
+            VolumeMount {
+                name: "shulker-forwarding-secret".to_string(),
+                mount_path: PROXY_SHULKER_FORWARDING_SECRET_DIR.to_string(),
+                read_only: Some(true),
+                ..VolumeMount::default()
+            },
+            VolumeMount {
+                name: "proxy-data".to_string(),
+                mount_path: PROXY_DATA_DIR.to_string(),
+                ..VolumeMount::default()
+            },
+            VolumeMount {
+                name: "proxy-drain-lock".to_string(),
+                mount_path: PROXY_DRAIN_LOCK_DIR.to_string(),
+                read_only: Some(true),
+                ..VolumeMount::default()
+            },
+            VolumeMount {
+                name: "proxy-tmp".to_string(),
+                mount_path: "/tmp".to_string(),
+                ..VolumeMount::default()
+            },
+        ];
+
+        let has_external_servers = context
+            .cluster
+            .spec
+            .external_servers
+            .as_ref()
+            .map_or(false, |list| !list.is_empty());
+
+        if has_external_servers {
+            volume_mounts.push(VolumeMount {
+                name: "shulker-external-servers".to_string(),
+                mount_path: PROXY_SHULKER_EXTERNAL_SERVERS_DIR.to_string(),
+                read_only: Some(true),
+                ..VolumeMount::default()
+            })
+        }
+
+        volume_mounts
     }
 }
 
@@ -1091,11 +1160,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_env_merges_env_overrides() {
+    async fn get_env_contains_preferred_reconnect_address() {
         // G
         let client = create_client_mock();
         let builder = super::FleetBuilder::new(client);
-        let spec = TEST_PROXY_FLEET.spec.clone();
+        let mut proxy_fleet = TEST_PROXY_FLEET.clone();
+        proxy_fleet
+            .spec
+            .service
+            .as_mut()
+            .unwrap()
+            .preferred_reconnection_address = Some("127.0.0.1".to_string());
         let context = super::FleetBuilderContext {
             cluster: &TEST_CLUSTER,
             agent_config: &AgentConfig {
@@ -1105,14 +1180,42 @@ mod tests {
         };
 
         // W
-        let env = builder.get_env(&context, &spec.template.spec).unwrap();
+        let env = builder.get_env(&context, &proxy_fleet).unwrap();
 
         // T
-        spec.template
+        let address_env = env
+            .iter()
+            .find(|env| env.name == "SHULKER_PROXY_PREFERRED_RECONNECT_ADDRESS")
+            .unwrap();
+        assert_eq!(address_env.value.as_ref().unwrap(), "127.0.0.1");
+    }
+
+    #[tokio::test]
+    async fn get_env_merges_env_overrides() {
+        // G
+        let client = create_client_mock();
+        let builder = super::FleetBuilder::new(client);
+        let context = super::FleetBuilderContext {
+            cluster: &TEST_CLUSTER,
+            agent_config: &AgentConfig {
+                maven_repository: constants::SHULKER_PLUGIN_REPOSITORY.to_string(),
+                version: constants::SHULKER_PLUGIN_VERSION.to_string(),
+            },
+        };
+
+        // W
+        let env = builder.get_env(&context, &TEST_PROXY_FLEET).unwrap();
+
+        // T
+        TEST_PROXY_FLEET
+            .spec
+            .template
             .spec
             .pod_overrides
+            .as_ref()
             .unwrap()
             .env
+            .as_ref()
             .unwrap()
             .iter()
             .for_each(|env_override| {

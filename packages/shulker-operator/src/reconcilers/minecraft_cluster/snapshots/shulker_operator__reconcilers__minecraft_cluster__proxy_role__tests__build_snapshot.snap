@@ -23,10 +23,19 @@ rules:
       - list
       - watch
       - update
+      - patch
+  - apiGroups:
+      - ""
+    resources:
+      - services
+    verbs:
+      - list
+      - get
+      - watch
   - apiGroups:
       - ""
     resources:
       - events
     verbs:
       - create
-
+      - patch

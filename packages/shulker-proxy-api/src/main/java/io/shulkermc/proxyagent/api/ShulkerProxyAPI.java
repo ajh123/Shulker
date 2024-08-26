@@ -9,8 +9,13 @@ import java.util.UUID;
 public abstract class ShulkerProxyAPI {
     public static ShulkerProxyAPI INSTANCE;
 
+    abstract public void shutdown();
+
+    abstract public void reconnectPlayerToCluster(@NotNull UUID playerId);
+
     abstract public @NotNull Set<String> getServersByTag(@NotNull String tag);
 
+    abstract public void teleportPlayerOnServer(@NotNull UUID playerId, @NotNull String serverName);
     abstract public @NotNull Optional<PlayerPosition> getPlayerPosition(@NotNull UUID playerId);
     abstract public boolean isPlayerConnected(@NotNull UUID playerId);
     abstract public int countOnlinePlayers();

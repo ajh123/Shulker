@@ -5,7 +5,17 @@ import java.util.Optional
 import java.util.UUID
 
 class ShulkerProxyAPIImpl(private val agent: ShulkerProxyAgentCommon) : ShulkerProxyAPI() {
+    override fun shutdown() = this.agent.shutdown()
+
+    override fun reconnectPlayerToCluster(playerId: UUID) = this.agent.playerMovementService.reconnectPlayerToCluster(playerId)
+
     override fun getServersByTag(tag: String): Set<String> = this.agent.serverDirectoryService.getServersByTag(tag)
+
+    override fun teleportPlayerOnServer(
+        playerId: UUID,
+        serverName: String,
+    ) =
+        this.agent.proxyInterface.teleportPlayerOnServer(playerId, serverName)
 
     override fun getPlayerPosition(playerId: UUID): Optional<PlayerPosition> =
         this.agent.cache.getPlayerPosition(

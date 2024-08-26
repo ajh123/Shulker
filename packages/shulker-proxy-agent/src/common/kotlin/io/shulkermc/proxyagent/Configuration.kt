@@ -1,5 +1,7 @@
 package io.shulkermc.proxyagent
 
+import io.shulkermc.proxyagent.utils.addressFromHostString
+import java.net.InetSocketAddress
 import java.util.Optional
 import java.util.UUID
 import kotlin.jvm.optionals.getOrDefault
@@ -10,10 +12,14 @@ object Configuration {
 
     val PROXY_NAMESPACE = getStringEnv("SHULKER_PROXY_NAMESPACE")
     val PROXY_NAME = getStringEnv("SHULKER_PROXY_NAME")
+    val PROXY_FLEET_NAME = getStringEnv("SHULKER_PROXY_FLEET_NAME")
     val PROXY_TTL_SECONDS = getLongEnv("SHULKER_PROXY_TTL_SECONDS")
     val PROXY_PLAYER_DELTA_BEFORE_EXCLUSION =
         getOptionalIntEnv("SHULKER_PROXY_PLAYER_DELTA_BEFORE_EXCLUSION")
             .getOrDefault(15)
+    val PROXY_PREFERRED_RECONNECT_ADDRESS: Optional<InetSocketAddress> =
+        getOptionalStringEnv("SHULKER_PROXY_PREFERRED_RECONNECT_ADDRESS")
+            .map { str -> addressFromHostString(str) }
 
     val NETWORK_ADMINS: List<UUID> =
         getOptionalStringEnv("SHULKER_NETWORK_ADMINS")
